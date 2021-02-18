@@ -1,4 +1,4 @@
-package dev.mcodex.RNSensitiveInfo;
+mtpackage dev.mcodex.RNSensitiveInfo;
 
 import android.app.Activity;
 import android.content.Context;
@@ -79,6 +79,11 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
 
     // Keep it true by default to maintain backwards compatibility with existing users.
     private boolean invalidateEnrollment = true;
+
+    // We keep this for 5minutes, otherwise we see the fingerprint modal too often
+    private Cipher cipher = null;
+    private long cipherExpiry = 0;
+    private static long CIPHER_TIMEOUT = 5 * 60 * 1000;
 
     public RNSensitiveInfoModule(ReactApplicationContext reactContext) {
         super(reactContext);
@@ -264,6 +269,8 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         if (mCancellationSignal != null && !mCancellationSignal.isCanceled()) {
             mCancellationSignal.cancel();
         }
+        cipher = null;
+        cipherExpiry = 0;
     }
 
     private SharedPreferences prefs(String name) {
@@ -406,6 +413,14 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && hasSetupBiometricCredential()) {
             try {
                 if (cipher == null) {
+                    if (this.cipher != null && System.currentTimeMillis() < cipherExpiry) {
+                        cipher = this.cipher;
+                    }
+                } else {
+                    this.cipher = cipher;
+                    cipherExpiry = System.currentTimeMillis() + CIPHER_TIMEOUT;
+                }
+                if (cipher == null) {
                     SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
                     cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
                     cipher.init(Cipher.ENCRYPT_MODE, secretKey);
@@ -531,6 +546,15 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
             try {
                 byte[] iv = Base64.decode(inputs[0], Base64.DEFAULT);
                 byte[] cipherBytes = Base64.decode(inputs[1], Base64.DEFAULT);
+
+                if (cipher == null) {
+                    if (this.cipher != null && System.currentTimeMillis() < cipherExpiry) {
+                        cipher = this.cipher;
+                    }
+                } else {
+                    this.cipher = cipher;
+                    cipherExpiry = System.currentTimeMillis() + CIPHER_TIMEOUT;
+                }
 
                 if (cipher == null) {
                     SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
