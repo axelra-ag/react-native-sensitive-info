@@ -1,4 +1,4 @@
-mtpackage dev.mcodex.RNSensitiveInfo;
+package dev.mcodex.RNSensitiveInfo;
 
 import android.app.Activity;
 import android.content.Context;
