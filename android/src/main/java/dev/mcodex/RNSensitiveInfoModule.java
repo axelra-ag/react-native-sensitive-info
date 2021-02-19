@@ -80,28 +80,23 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
     // Keep it true by default to maintain backwards compatibility with existing users.
     private boolean invalidateEnrollment = true;
 
-    // We keep this for 5minutes, otherwise we see the fingerprint modal too often
-    private Cipher cipher = null;
-    private long cipherExpiry = 0;
-    private static long CIPHER_TIMEOUT = 5 * 60 * 1000;
-
     public RNSensitiveInfoModule(ReactApplicationContext reactContext) {
         super(reactContext);
-        
+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.JELLY_BEAN_MR2) {
             Exception cause = new RuntimeException("Keystore is not supported!");
             throw new RuntimeException("Android version is too low", cause);
         }
-        
+
         try {
             mKeyStore = KeyStore.getInstance(ANDROID_KEYSTORE_PROVIDER);
             mKeyStore.load(null);
         } catch (Exception e) {
             e.printStackTrace();
         }
-        
+
         initKeyStore();
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             try {
                 mFingerprintManager = (FingerprintManager) reactContext.getSystemService(Context.FINGERPRINT_SERVICE);
@@ -269,8 +264,6 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         if (mCancellationSignal != null && !mCancellationSignal.isCanceled()) {
             mCancellationSignal.cancel();
         }
-        cipher = null;
-        cipherExpiry = 0;
     }
 
     private SharedPreferences prefs(String name) {
@@ -291,7 +284,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         SharedPreferences.Editor editor = mSharedPreferences.edit();
         editor.putString(key, value).apply();
     }
-    
+
     /**
      * Generates a new RSA key and stores it under the { @code KEY_ALIAS } in the
      * Android Keystore.
@@ -320,7 +313,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                     .setStartDate(notBefore.getTime())
                     .setEndDate(notAfter.getTime())
                     .build();
-                    KeyPairGenerator kpGenerator = KeyPairGenerator.getInstance("RSA", ANDROID_KEYSTORE_PROVIDER);   
+                    KeyPairGenerator kpGenerator = KeyPairGenerator.getInstance("RSA", ANDROID_KEYSTORE_PROVIDER);
                     kpGenerator.initialize(spec);
                     kpGenerator.generateKeyPair();
                 }
@@ -381,7 +374,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
     }
 
     private void prepareKey() throws Exception {
-        
+
         KeyGenerator keyGenerator = KeyGenerator.getInstance(
                 KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE_PROVIDER);
 
@@ -394,7 +387,8 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                 .setKeySize(256)
                 .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
                 // forces user authentication with fingerprint
-                .setUserAuthenticationRequired(true);
+                .setUserAuthenticationRequired(true)
+                .setUserAuthenticationValidityDurationSeconds(5*60);
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             try {
@@ -412,14 +406,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M && hasSetupBiometricCredential()) {
             try {
-                if (cipher == null) {
-                    if (this.cipher != null && System.currentTimeMillis() < cipherExpiry) {
-                        cipher = this.cipher;
-                    }
-                } else {
-                    this.cipher = cipher;
-                    cipherExpiry = System.currentTimeMillis() + CIPHER_TIMEOUT;
-                }
+                byte[] encryptedBytes;
                 if (cipher == null) {
                     SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
                     cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
@@ -430,70 +417,18 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                             secretKey.getAlgorithm(), ANDROID_KEYSTORE_PROVIDER);
                     KeyInfo info = (KeyInfo) factory.getKeySpec(secretKey, KeyInfo.class);
 
-                    if (info.isUserAuthenticationRequired() &&
-                            info.getUserAuthenticationValidityDurationSeconds() <= 0) {
-
-                        if (showModal) {
-                            class PutExtraWithAESCallback extends BiometricPrompt.AuthenticationCallback {
-                                @Override
-                                public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                        putExtraWithAES(key, value, mSharedPreferences, true, strings, pm, result.getCryptoObject().getCipher());
-                                    }
-                                }
-
-                                @Override
-                                public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
-                                    pm.reject(String.valueOf(errorCode), errString.toString());
-                                }
-
-                                @Override
-                                public void onAuthenticationFailed() {
-                                    getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                            .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
-                                }
-                            }
-
-                            showDialog(strings, new BiometricPrompt.CryptoObject(cipher), new PutExtraWithAESCallback());
-                        } else {
-                            mCancellationSignal = new CancellationSignal();
-                            mFingerprintManager.authenticate(new FingerprintManager.CryptoObject(cipher), mCancellationSignal,
-                                    0, new FingerprintManager.AuthenticationCallback() {
-
-                                        @Override
-                                        public void onAuthenticationFailed() {
-                                            super.onAuthenticationFailed();
-                                            getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                                    .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Fingerprint not recognized.");
-                                        }
-
-                                        @Override
-                                        public void onAuthenticationError(int errorCode, CharSequence errString) {
-                                            super.onAuthenticationError(errorCode, errString);
-                                            pm.reject(String.valueOf(errorCode), errString.toString());
-                                        }
-
-                                        @Override
-                                        public void onAuthenticationHelp(int helpCode, CharSequence helpString) {
-                                            super.onAuthenticationHelp(helpCode, helpString);
-                                            getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                                    .emit(AppConstants.FINGERPRINT_AUTHENTICATION_HELP, helpString.toString());
-                                        }
-
-                                        @Override
-                                        public void onAuthenticationSucceeded(FingerprintManager.AuthenticationResult result) {
-                                            super.onAuthenticationSucceeded(result);
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                                putExtraWithAES(key, value, mSharedPreferences, false, strings, pm, result.getCryptoObject().getCipher());
-                                            }
-                                        }
-                                    }, null);
-                        }
+                    try {
+                        //just test if we can unlock without fingerprint
+                        encryptedBytes = cipher.doFinal(value.getBytes());
+                    } catch (Exception e) {
+                        showAuthEnc(key, value, mSharedPreferences, showModal, strings, pm, cipher, info);
+                        return;
                     }
-                    return;
+                } else {
+                    encryptedBytes = cipher.doFinal(value.getBytes());
                 }
 
-                byte[] encryptedBytes = cipher.doFinal(value.getBytes());
+                //byte[] encryptedBytes = cipher.doFinal(value.getBytes());
 
                 // Encode the initialization vector (IV) and encryptedBytes to Base64.
                 String base64IV = Base64.encodeToString(cipher.getIV(), Base64.DEFAULT);
@@ -533,6 +468,71 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         }
     }
 
+    private void showAuthEnc(final String key, final String value, final SharedPreferences mSharedPreferences, boolean showModal, final HashMap strings, final Promise pm, Cipher cipher, KeyInfo info) {
+
+        if (info.isUserAuthenticationRequired() &&
+                info.getUserAuthenticationValidityDurationSeconds() <= 0) {
+
+            if (showModal) {
+                class PutExtraWithAESCallback extends BiometricPrompt.AuthenticationCallback {
+                    @Override
+                    public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            putExtraWithAES(key, value, mSharedPreferences, true, strings, pm, result.getCryptoObject().getCipher());
+                        }
+                    }
+
+                    @Override
+                    public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
+                        pm.reject(String.valueOf(errorCode), errString.toString());
+                    }
+
+                    @Override
+                    public void onAuthenticationFailed() {
+                        getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
+                    }
+                }
+
+                showDialog(strings, new BiometricPrompt.CryptoObject(cipher), new PutExtraWithAESCallback());
+            } else {
+                mCancellationSignal = new CancellationSignal();
+                mFingerprintManager.authenticate(new FingerprintManager.CryptoObject(cipher), mCancellationSignal,
+                        0, new FingerprintManager.AuthenticationCallback() {
+
+                            @Override
+                            public void onAuthenticationFailed() {
+                                super.onAuthenticationFailed();
+                                getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                        .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Fingerprint not recognized.");
+                            }
+
+                            @Override
+                            public void onAuthenticationError(int errorCode, CharSequence errString) {
+                                super.onAuthenticationError(errorCode, errString);
+                                pm.reject(String.valueOf(errorCode), errString.toString());
+                            }
+
+                            @Override
+                            public void onAuthenticationHelp(int helpCode, CharSequence helpString) {
+                                super.onAuthenticationHelp(helpCode, helpString);
+                                getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                        .emit(AppConstants.FINGERPRINT_AUTHENTICATION_HELP, helpString.toString());
+                            }
+
+                            @Override
+                            public void onAuthenticationSucceeded(FingerprintManager.AuthenticationResult result) {
+                                super.onAuthenticationSucceeded(result);
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                    putExtraWithAES(key, value, mSharedPreferences, false, strings, pm, result.getCryptoObject().getCipher());
+                                }
+                            }
+                        }, null);
+            }
+        }
+        return;
+    }
+
     private void decryptWithAes(final String encrypted, final boolean showModal, final HashMap strings, final Promise pm, Cipher cipher) {
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M
@@ -547,15 +547,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                 byte[] iv = Base64.decode(inputs[0], Base64.DEFAULT);
                 byte[] cipherBytes = Base64.decode(inputs[1], Base64.DEFAULT);
 
-                if (cipher == null) {
-                    if (this.cipher != null && System.currentTimeMillis() < cipherExpiry) {
-                        cipher = this.cipher;
-                    }
-                } else {
-                    this.cipher = cipher;
-                    cipherExpiry = System.currentTimeMillis() + CIPHER_TIMEOUT;
-                }
-
+                byte[] decryptedBytes;
                 if (cipher == null) {
                     SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
                     cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
@@ -565,69 +557,18 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                             secretKey.getAlgorithm(), ANDROID_KEYSTORE_PROVIDER);
                     KeyInfo info = (KeyInfo) factory.getKeySpec(secretKey, KeyInfo.class);
 
-                    if (info.isUserAuthenticationRequired() &&
-                            info.getUserAuthenticationValidityDurationSeconds() <= 0) {
-
-                        if (showModal) {
-                            class DecryptWithAesCallback extends BiometricPrompt.AuthenticationCallback {
-                                @Override
-                                public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
-                                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                        decryptWithAes(encrypted, true, strings, pm, result.getCryptoObject().getCipher());
-                                    }
-                                }
-
-                                @Override
-                                public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
-                                    pm.reject(String.valueOf(errorCode), errString.toString());
-                                }
-
-                                @Override
-                                public void onAuthenticationFailed() {
-                                    getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                            .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
-                                }
-                            }
-
-                            showDialog(strings, new BiometricPrompt.CryptoObject(cipher), new DecryptWithAesCallback());
-                        } else {
-                            mCancellationSignal = new CancellationSignal();
-                            mFingerprintManager.authenticate(new FingerprintManager.CryptoObject(cipher), mCancellationSignal,
-                                    0, new FingerprintManager.AuthenticationCallback() {
-
-                                        @Override
-                                        public void onAuthenticationFailed() {
-                                            super.onAuthenticationFailed();
-                                            getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                                    .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Fingerprint not recognized.");
-                                        }
-
-                                        @Override
-                                        public void onAuthenticationError(int errorCode, CharSequence errString) {
-                                            super.onAuthenticationError(errorCode, errString);
-                                            pm.reject(String.valueOf(errorCode), errString.toString());
-                                        }
-
-                                        @Override
-                                        public void onAuthenticationHelp(int helpCode, CharSequence helpString) {
-                                            super.onAuthenticationHelp(helpCode, helpString);
-                                            getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                                                    .emit(AppConstants.FINGERPRINT_AUTHENTICATION_HELP, helpString.toString());
-                                        }
-
-                                        @Override
-                                        public void onAuthenticationSucceeded(FingerprintManager.AuthenticationResult result) {
-                                            super.onAuthenticationSucceeded(result);
-                                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                                                decryptWithAes(encrypted, false, strings, pm, result.getCryptoObject().getCipher());
-                                            }
-                                        }
-                                    }, null);
-                        }
+                    try {
+                        //just test if we can unlock without fingerprint
+                        decryptedBytes = cipher.doFinal(cipherBytes);
+                    } catch (Exception e) {
+                        showAuthDec(encrypted, showModal, strings, pm, cipher, info);
+                        return;
                     }
-                    return;
+
+                } else {
+                    decryptedBytes = cipher.doFinal(cipherBytes);
                 }
-                byte[] decryptedBytes = cipher.doFinal(cipherBytes);
+                //byte[] decryptedBytes = cipher.doFinal(cipherBytes);
                 pm.resolve(new String(decryptedBytes));
             } catch (InvalidKeyException | UnrecoverableKeyException e) {
                 try {
@@ -649,7 +590,7 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                 } else {
                     pm.reject(e);
                 }
-             } catch (BadPaddingException e){
+            } catch (BadPaddingException e){
                 Log.d("RNSensitiveInfo", "Biometric key invalid");
                 pm.reject(AppConstants.E_BIOMETRICS_INVALIDATED, e.getCause().getMessage());
             } catch (SecurityException e) {
@@ -661,11 +602,75 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
             pm.reject(AppConstants.E_BIOMETRIC_NOT_SUPPORTED, "Biometrics not supported");
         }
     }
-    
+
+    private void showAuthDec(final String encrypted, boolean showModal, final HashMap strings, final Promise pm, Cipher cipher, KeyInfo info) {
+
+        if (info.isUserAuthenticationRequired() &&
+                info.getUserAuthenticationValidityDurationSeconds() <= 0) {
+
+            if (showModal) {
+                class DecryptWithAesCallback extends BiometricPrompt.AuthenticationCallback {
+                    @Override
+                    public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            decryptWithAes(encrypted, true, strings, pm, result.getCryptoObject().getCipher());
+                        }
+                    }
+
+                    @Override
+                    public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
+                        pm.reject(String.valueOf(errorCode), errString.toString());
+                    }
+
+                    @Override
+                    public void onAuthenticationFailed() {
+                        getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
+                    }
+                }
+
+                showDialog(strings, new BiometricPrompt.CryptoObject(cipher), new DecryptWithAesCallback());
+            } else {
+                mCancellationSignal = new CancellationSignal();
+                mFingerprintManager.authenticate(new FingerprintManager.CryptoObject(cipher), mCancellationSignal,
+                        0, new FingerprintManager.AuthenticationCallback() {
+
+                            @Override
+                            public void onAuthenticationFailed() {
+                                super.onAuthenticationFailed();
+                                getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                        .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Fingerprint not recognized.");
+                            }
+
+                            @Override
+                            public void onAuthenticationError(int errorCode, CharSequence errString) {
+                                super.onAuthenticationError(errorCode, errString);
+                                pm.reject(String.valueOf(errorCode), errString.toString());
+                            }
+
+                            @Override
+                            public void onAuthenticationHelp(int helpCode, CharSequence helpString) {
+                                super.onAuthenticationHelp(helpCode, helpString);
+                                getReactApplicationContext().getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                                        .emit(AppConstants.FINGERPRINT_AUTHENTICATION_HELP, helpString.toString());
+                            }
+
+                            @Override
+                            public void onAuthenticationSucceeded(FingerprintManager.AuthenticationResult result) {
+                                super.onAuthenticationSucceeded(result);
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                    decryptWithAes(encrypted, false, strings, pm, result.getCryptoObject().getCipher());
+                                }
+                            }
+                        }, null);
+            }
+        }
+    }
+
     public String encrypt(String input) throws Exception {
         byte[] bytes = input.getBytes();
         Cipher c;
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Key secretKey = ((KeyStore.SecretKeyEntry) mKeyStore.getEntry(KEY_ALIAS, null)).getSecretKey();
             c = Cipher.getInstance(AES_GCM);
