@@ -10,6 +10,7 @@ import android.security.KeyPairGeneratorSpec;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyInfo;
 import android.security.keystore.KeyProperties;
+import android.security.keystore.UserNotAuthenticatedException;
 import android.util.Base64;
 import android.util.Log;
 
@@ -34,6 +35,8 @@ import java.security.InvalidKeyException;
 import java.security.Key;
 import java.security.KeyPairGenerator;
 import java.security.KeyStore;
+import java.security.KeyStoreException;
+import java.security.NoSuchAlgorithmException;
 import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.UnrecoverableKeyException;
@@ -307,12 +310,12 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                     Calendar notAfter = Calendar.getInstance();
                     notAfter.add(Calendar.YEAR, 10);
                     KeyPairGeneratorSpec spec = new KeyPairGeneratorSpec.Builder(getReactApplicationContext())
-                    .setAlias(KEY_ALIAS)
-                    .setSubject(new X500Principal("CN=" + KEY_ALIAS))
-                    .setSerialNumber(BigInteger.valueOf(1337))
-                    .setStartDate(notBefore.getTime())
-                    .setEndDate(notAfter.getTime())
-                    .build();
+                            .setAlias(KEY_ALIAS)
+                            .setSubject(new X500Principal("CN=" + KEY_ALIAS))
+                            .setSerialNumber(BigInteger.valueOf(1337))
+                            .setStartDate(notBefore.getTime())
+                            .setEndDate(notAfter.getTime())
+                            .build();
                     KeyPairGenerator kpGenerator = KeyPairGenerator.getInstance("RSA", ANDROID_KEYSTORE_PROVIDER);
                     kpGenerator.initialize(spec);
                     kpGenerator.generateKeyPair();
@@ -348,7 +351,12 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                         .setDescription(strings.containsKey("description") ? strings.get("description").toString() : null)
                                         .setTitle(strings.containsKey("header") ? strings.get("header").toString() : "Unlock with your fingerprint")
                                         .build();
-                                biometricPrompt.authenticate(promptInfo, cryptoObject);
+                                if (cryptoObject == null) {
+                                    biometricPrompt.authenticate(promptInfo);
+                                } else {
+                                    biometricPrompt.authenticate(promptInfo, cryptoObject);
+                                }
+
                             } catch (Exception e) {
                                 throw e;
                             }
@@ -409,19 +417,23 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                 byte[] encryptedBytes;
                 if (cipher == null) {
                     SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
-                    cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
-                    cipher.init(Cipher.ENCRYPT_MODE, secretKey);
-
                     // Retrieve information about the SecretKey from the KeyStore.
                     SecretKeyFactory factory = SecretKeyFactory.getInstance(
                             secretKey.getAlgorithm(), ANDROID_KEYSTORE_PROVIDER);
                     KeyInfo info = (KeyInfo) factory.getKeySpec(secretKey, KeyInfo.class);
+                    cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
+                    try {
+                        cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+                    } catch (UserNotAuthenticatedException e) {
+                        showAuthEnc(key, value, mSharedPreferences, showModal, strings, pm, cipher, false, info);
+                        return;
+                    }
 
                     try {
                         //just test if we can unlock without fingerprint
                         encryptedBytes = cipher.doFinal(value.getBytes());
                     } catch (Exception e) {
-                        showAuthEnc(key, value, mSharedPreferences, showModal, strings, pm, cipher, info);
+                        showAuthEnc(key, value, mSharedPreferences, showModal, strings, pm, cipher, true, info);
                         return;
                     }
                 } else {
@@ -468,17 +480,30 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         }
     }
 
-    private void showAuthEnc(final String key, final String value, final SharedPreferences mSharedPreferences, boolean showModal, final HashMap strings, final Promise pm, Cipher cipher, KeyInfo info) {
+    private void showAuthEnc(final String key, final String value, final SharedPreferences mSharedPreferences, boolean showModal, final HashMap strings, final Promise pm, final Cipher cipher, final boolean cipherInit, KeyInfo info) {
 
-        if (info.isUserAuthenticationRequired() &&
-                info.getUserAuthenticationValidityDurationSeconds() <= 0) {
+        if (info.isUserAuthenticationRequired()) {
 
             if (showModal) {
                 class PutExtraWithAESCallback extends BiometricPrompt.AuthenticationCallback {
                     @Override
                     public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            putExtraWithAES(key, value, mSharedPreferences, true, strings, pm, result.getCryptoObject().getCipher());
+                            Cipher cipher2;
+                            if(result.getCryptoObject() == null) {
+                                try {
+                                    SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
+                                    cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+                                    cipher2 = cipher;
+                                } catch (KeyStoreException | NoSuchAlgorithmException | UnrecoverableKeyException | InvalidKeyException e) {
+                                    e.printStackTrace();
+                                    onAuthenticationError(BiometricConstants.ERROR_VENDOR, e.getMessage());
+                                    return;
+                                }
+                            } else {
+                                cipher2 = result.getCryptoObject().getCipher();
+                            }
+                            putExtraWithAES(key, value, mSharedPreferences, true, strings, pm, cipher2);
                         }
                     }
 
@@ -493,11 +518,11 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                 .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
                     }
                 }
-
-                showDialog(strings, new BiometricPrompt.CryptoObject(cipher), new PutExtraWithAESCallback());
+                //https://stackoverflow.com/questions/39078271/usernotauthenticatedexception-during-fingerprintmanager-authenticate
+                showDialog(strings, cipherInit? new BiometricPrompt.CryptoObject(cipher) : null, new PutExtraWithAESCallback());
             } else {
                 mCancellationSignal = new CancellationSignal();
-                mFingerprintManager.authenticate(new FingerprintManager.CryptoObject(cipher), mCancellationSignal,
+                mFingerprintManager.authenticate(cipherInit? new FingerprintManager.CryptoObject(cipher) : null, mCancellationSignal,
                         0, new FingerprintManager.AuthenticationCallback() {
 
                             @Override
@@ -550,18 +575,22 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                 byte[] decryptedBytes;
                 if (cipher == null) {
                     SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);
-                    cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
-                    cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
-
                     SecretKeyFactory factory = SecretKeyFactory.getInstance(
                             secretKey.getAlgorithm(), ANDROID_KEYSTORE_PROVIDER);
                     KeyInfo info = (KeyInfo) factory.getKeySpec(secretKey, KeyInfo.class);
+                    cipher = Cipher.getInstance(AES_DEFAULT_TRANSFORMATION);
+                    try {
+                        cipher.init(Cipher.DECRYPT_MODE, secretKey, new IvParameterSpec(iv));
+                    } catch (UserNotAuthenticatedException e) {
+                        showAuthDec(encrypted, showModal, strings, pm, cipher, false, info);
+                        return;
+                    }
 
                     try {
                         //just test if we can unlock without fingerprint
                         decryptedBytes = cipher.doFinal(cipherBytes);
                     } catch (Exception e) {
-                        showAuthDec(encrypted, showModal, strings, pm, cipher, info);
+                        showAuthDec(encrypted, showModal, strings, pm, cipher, true, info);
                         return;
                     }
 
@@ -603,17 +632,32 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
         }
     }
 
-    private void showAuthDec(final String encrypted, boolean showModal, final HashMap strings, final Promise pm, Cipher cipher, KeyInfo info) {
+    private void showAuthDec(final String encrypted, boolean showModal, final HashMap strings, final Promise pm, final Cipher cipher, final boolean cipherInit, KeyInfo info) {
 
-        if (info.isUserAuthenticationRequired() &&
-                info.getUserAuthenticationValidityDurationSeconds() <= 0) {
+        if (info.isUserAuthenticationRequired()) {
 
             if (showModal) {
                 class DecryptWithAesCallback extends BiometricPrompt.AuthenticationCallback {
                     @Override
                     public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                            decryptWithAes(encrypted, true, strings, pm, result.getCryptoObject().getCipher());
+                            Cipher cipher2;
+                            if(result.getCryptoObject() == null) {
+                                try {
+                                    SecretKey secretKey = (SecretKey) mKeyStore.getKey(KEY_ALIAS_AES, null);;
+                                    cipher.init(Cipher.DECRYPT_MODE, secretKey);
+                                    cipher2 = cipher;
+                                } catch (KeyStoreException | NoSuchAlgorithmException | UnrecoverableKeyException | InvalidKeyException e) {
+                                    e.printStackTrace();
+                                    onAuthenticationError(BiometricConstants.ERROR_VENDOR, e.getMessage());
+                                    return;
+                                }
+
+                            } else {
+                                cipher2 = result.getCryptoObject().getCipher();
+                            }
+
+                            decryptWithAes(encrypted, true, strings, pm, cipher2);
                         }
                     }
 
@@ -628,11 +672,11 @@ public class RNSensitiveInfoModule extends ReactContextBaseJavaModule {
                                 .emit(AppConstants.E_AUTHENTICATION_NOT_RECOGNIZED, "Authentication not recognized.");
                     }
                 }
-
-                showDialog(strings, new BiometricPrompt.CryptoObject(cipher), new DecryptWithAesCallback());
+                //https://stackoverflow.com/questions/39078271/usernotauthenticatedexception-during-fingerprintmanager-authenticate
+                showDialog(strings, cipherInit ? new BiometricPrompt.CryptoObject(cipher) : null, new DecryptWithAesCallback());
             } else {
                 mCancellationSignal = new CancellationSignal();
-                mFingerprintManager.authenticate(new FingerprintManager.CryptoObject(cipher), mCancellationSignal,
+                mFingerprintManager.authenticate(cipherInit? new FingerprintManager.CryptoObject(cipher) : null, mCancellationSignal,
                         0, new FingerprintManager.AuthenticationCallback() {
 
                             @Override
